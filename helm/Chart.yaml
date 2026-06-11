@@ -1,0 +1,14 @@
+apiVersion: v2
+name: sd-fraud-detection
+description: "BIAN Service Domain: Fraud Detection (Monitor pattern, Risk and Compliance)"
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - bian
+  - monitor
+annotations:
+  bian/business-area: "Risk and Compliance"
+  bian/business-domain: "Financial Crime"
+  bian/asset-type: "Fraud Alert"
+  bian/control-record: "Fraud Alert Monitoring State"
