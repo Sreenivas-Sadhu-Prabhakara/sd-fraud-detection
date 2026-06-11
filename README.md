@@ -1,55 +1,40 @@
 # Fraud Detection
 
-BIAN Service Domain microservice — part of the [bian-platform](../../bian-platform/) landscape.
+BIAN Service Domain microservice — **Phase 2b-c DEEP build** (graduated; see `.bian-graduated`). One of the three **flagship** counterparties (fraud).
 
 | | |
 |---|---|
-| **Business Area** | Risk and Compliance |
-| **Business Domain** | Financial Crime |
-| **Functional Pattern** | Monitor |
-| **Asset Type** | Fraud Alert |
-| **Control Record** | Fraud Alert Monitoring State |
+| **Business Area / Domain** | Risk and Compliance / Financial Crime |
+| **Pattern / Control Record** | Monitor / Fraud Alert Monitoring State |
 | **K8s Namespace** | `bian-risk-compliance` |
-| **Stack** | Java 21 · Spring Boot 3 · Resilience4j · Cilium mesh |
 
-> ⚠️ **Phase 1 (shallow):** real REST API over an in-memory store. Phase 2 replaces the store with per-domain persistence and real domain logic. This repo was stamped from `bian-platform/generator` — regenerate rather than hand-editing boilerplate.
+## The scoring model (deterministic, explainable)
 
-## BIAN Semantic API
-
-| Method | Path | BIAN action term |
+| Rule | Points | Fires when |
 |---|---|---|
-| GET | `/v1/service-domain` | — (SD metadata) |
-| POST | `/v1/fraud-alert-monitoring-state/initiate` | Initiate |
-| GET | `/v1/fraud-alert-monitoring-state` | Retrieve (list) |
-| GET | `/v1/fraud-alert-monitoring-state/{crId}/retrieve` | Retrieve |
-| PUT | `/v1/fraud-alert-monitoring-state/{crId}/update` | Update |
-| PUT | `/v1/fraud-alert-monitoring-state/{crId}/control` | Control — body `{"action": "suspend"\|"resume"\|"terminate"}` |
+| `LARGE_AMOUNT` | +70 | amount ≥ `bian.fraud.large-amount-minor` (default ₹10,000) — alerts on its own |
+| `VELOCITY` | +50 | >5 activities for the account within a rolling 10-minute window |
+| `ROUND_AMOUNT` | +25 | conspicuously round amount (×100 000 minor) at ≥ half the large threshold — the structuring signal |
 
-OpenAPI UI: `/swagger-ui.html` · Health: `/actuator/health` · Metrics: `/actuator/prometheus`
+Alert raised at score ≥ **60** (`bian.fraud.alert-threshold`). Every evaluation returns the score + triggered rules — scoring is never a black box. Every activity is recorded as future velocity evidence whether or not it alerts.
 
-**API contract:** [`api/openapi.yaml`](api/openapi.yaml) — owned by **this repo** (contract-per-repo; no central contracts repo). The runtime spec at `/v3/api-docs` must stay compatible with it; Phase 2 adds contract tests that enforce this.
+**Investigation lifecycle:** `OPEN → CONFIRMED_FRAUD | FALSE_POSITIVE` (terminal).
 
-## Run locally
+## Flagship wiring
+
+Consumes `transaction.posted` (current + savings accounts) and `cheque.lodged` (cheque processing) — **via `POST /evaluate` over HTTP today**, via Kafka consumers when the backbone lands (same evaluation path). Publishes `fraud.alert.raised` / `fraud.alert.resolved` on `bian.fraud.alerts`.
+
+## API (contracts owned by this repo: [`api/openapi.yaml`](api/openapi.yaml), [`api/events.yaml`](api/events.yaml))
 
 ```bash
 mvn spring-boot:run
-curl localhost:8080/v1/service-domain
-
-# lifecycle smoke test
-curl -X POST localhost:8080/v1/fraud-alert-monitoring-state/initiate -H 'content-type: application/json' -d '{"note":"hello"}'
+CR=/v1/fraud-alert-monitoring-state
+curl -s -X POST localhost:8080$CR/evaluate -H 'content-type: application/json' \
+  -d '{"accountRef":"CA-1","sourceType":"TRANSACTION","sourceRef":"TX-1","amountMinor":5000000}'
+# → {"riskScore":95,"triggeredRules":["LARGE_AMOUNT","ROUND_AMOUNT"],"alertRaised":true,"alertId":"FA-…"}
+curl -s "localhost:8080$CR?status=OPEN"
 ```
 
-## Build & containerize
+## Persistence & tests
 
-```bash
-mvn -B verify
-docker build -t bian/sd-fraud-detection:0.1.0 .
-```
-
-## Deploy (Helm → K8s with Cilium mesh)
-
-```bash
-helm upgrade --install sd-fraud-detection ./helm -n bian-risk-compliance
-```
-
-Exposed through the platform Gateway at path prefix `/sd-fraud-detection` (Cilium Gateway API). Mesh policy (`CiliumNetworkPolicy`) allows: gateway ingress, same-area peers, Prometheus — everything else denied.
+In-memory port/adapter (the activity log doubles as the velocity window). Postgres staged in [`db/schema.sql`](db/schema.sql) — gated. `mvn verify` proves each rule, the sliding window (injected Clock), and the terminal resolution lifecycle.

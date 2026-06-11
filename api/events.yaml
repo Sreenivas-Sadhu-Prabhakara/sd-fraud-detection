@@ -1,0 +1,22 @@
+# Event contract — owned by THIS repo. Topic catalog: bian-platform/platform-infra/kafka/topics.yaml
+service: sd-fraud-detection
+publishes:
+  - topic: bian.fraud.alerts          # FLAGSHIP FRAUD FLOW
+    events:
+      - type: fraud.alert.raised
+        payload: [alertId, accountRef, sourceType, sourceRef, amountMinor, riskScore, reasons]
+      - type: fraud.alert.resolved
+        payload: [alertId, resolution, notes]
+consumes:
+  - topic: bian.accounts.current-account
+    events:
+      - type: transaction.posted      # → POST /evaluate (HTTP bridge today, consumer later)
+        from: sd-current-account
+  - topic: bian.accounts.savings-account
+    events:
+      - type: transaction.posted
+        from: sd-savings-account
+  - topic: bian.cheques.lifecycle
+    events:
+      - type: cheque.lodged           # high-value lodgement signal
+        from: sd-cheque-processing

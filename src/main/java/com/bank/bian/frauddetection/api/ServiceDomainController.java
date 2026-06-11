@@ -1,8 +1,8 @@
 package com.bank.bian.frauddetection.api;
 
-import com.bank.bian.frauddetection.model.ControlRecord;
-import com.bank.bian.frauddetection.service.ControlRecordStore;
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import com.bank.bian.frauddetection.domain.DomainException;
+import com.bank.bian.frauddetection.domain.FraudAlert;
+import com.bank.bian.frauddetection.domain.FraudDetectionService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -11,24 +11,25 @@ import java.util.Collection;
 import java.util.Map;
 
 /**
- * BIAN semantic API for the "Fraud Detection" service domain.
+ * BIAN semantic API for "Fraud Detection" — Phase 2b-c, real domain.
+ * Control record: Fraud Alert Monitoring State (Monitor pattern).
  *
- * Endpoints follow the BIAN action-term style:
- *   GET  /v1/service-domain                          → who am I (SD metadata)
- *   POST /v1/fraud-alert-monitoring-state/initiate                    → Initiate a control record
- *   GET  /v1/fraud-alert-monitoring-state                             → Retrieve (list)
- *   GET  /v1/fraud-alert-monitoring-state/{crId}/retrieve             → Retrieve (single)
- *   PUT  /v1/fraud-alert-monitoring-state/{crId}/update               → Update
- *   PUT  /v1/fraud-alert-monitoring-state/{crId}/control              → Control (suspend|resume|terminate)
+ * /evaluate is the flagship ingest bridge: account and cheque SDs feed
+ * transaction.posted / cheque.lodged shapes here over HTTP until the Kafka
+ * consumers take over (same evaluation path either way).
+ *
+ * Contract: api/openapi.yaml (owned by this repo).
  */
 @RestController
 @RequestMapping("/v1")
 public class ServiceDomainController {
 
-    private final ControlRecordStore store;
+    static final String CR = "fraud-alert-monitoring-state";
 
-    public ServiceDomainController(ControlRecordStore store) {
-        this.store = store;
+    private final FraudDetectionService service;
+
+    public ServiceDomainController(FraudDetectionService service) {
+        this.service = service;
     }
 
     @GetMapping("/service-domain")
@@ -40,46 +41,53 @@ public class ServiceDomainController {
                 "functionalPattern", "Monitor",
                 "assetType", "Fraud Alert",
                 "controlRecord", "Fraud Alert Monitoring State",
-                "version", "0.1.0",
-                "phase", "1-shallow"
+                "version", "0.2.0",
+                "phase", "2b-deep"
         );
     }
 
-    @PostMapping("/fraud-alert-monitoring-state/initiate")
-    @CircuitBreaker(name = "serviceDomain")
-    public ResponseEntity<ControlRecord> initiate(@RequestBody(required = false) Map<String, Object> properties) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(store.initiate(properties));
-    }
+    // ── the ingest/scoring bridge ────────────────────────────────────────────
 
-    @GetMapping("/fraud-alert-monitoring-state")
-    public Collection<ControlRecord> list() {
-        return store.list();
-    }
+    public record EvaluateRequest(String accountRef, String sourceType, String sourceRef,
+                                  long amountMinor, String currency) {}
 
-    @GetMapping("/fraud-alert-monitoring-state/{crId}/retrieve")
-    public ResponseEntity<ControlRecord> retrieve(@PathVariable String crId) {
-        return store.retrieve(crId)
-                .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
-    }
-
-    @PutMapping("/fraud-alert-monitoring-state/{crId}/update")
-    public ResponseEntity<ControlRecord> update(@PathVariable String crId,
-                                                @RequestBody Map<String, Object> properties) {
-        return store.update(crId, properties)
-                .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
-    }
-
-    @PutMapping("/fraud-alert-monitoring-state/{crId}/control")
-    public ResponseEntity<?> control(@PathVariable String crId,
-                                     @RequestBody Map<String, String> body) {
+    @PostMapping("/" + CR + "/evaluate")
+    public FraudDetectionService.Evaluation evaluate(@RequestBody EvaluateRequest req) {
+        FraudAlert.SourceType type;
         try {
-            return store.control(crId, body.get("action"))
-                    .<ResponseEntity<?>>map(ResponseEntity::ok)
-                    .orElse(ResponseEntity.notFound().build());
+            type = FraudAlert.SourceType.valueOf(
+                    (req.sourceType() == null ? "TRANSACTION" : req.sourceType()).toUpperCase());
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+            throw DomainException.invalid("UNKNOWN_SOURCE_TYPE", "sourceType must be TRANSACTION | CHEQUE");
         }
+        return service.evaluate(req.accountRef(), type, req.sourceRef(),
+                req.amountMinor(), req.currency() == null ? "INR" : req.currency());
+    }
+
+    // ── alert lifecycle ──────────────────────────────────────────────────────
+
+    @GetMapping("/" + CR)
+    public Collection<FraudAlert> list(@RequestParam(required = false) String status) {
+        if (status == null) {
+            return service.list(null);
+        }
+        try {
+            return service.list(FraudAlert.Status.valueOf(status.toUpperCase()));
+        } catch (IllegalArgumentException e) {
+            throw DomainException.invalid("UNKNOWN_STATUS",
+                    "status must be OPEN | CONFIRMED_FRAUD | FALSE_POSITIVE");
+        }
+    }
+
+    @GetMapping("/" + CR + "/{alertId}/retrieve")
+    public FraudAlert retrieve(@PathVariable String alertId) {
+        return service.retrieve(alertId);
+    }
+
+    @PutMapping("/" + CR + "/{alertId}/control")
+    public ResponseEntity<FraudAlert> control(@PathVariable String alertId,
+                                              @RequestBody Map<String, String> body) {
+        return ResponseEntity.status(HttpStatus.OK)
+                .body(service.resolve(alertId, body.get("action"), body.get("notes")));
     }
 }
